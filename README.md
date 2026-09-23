@@ -48,6 +48,78 @@ DeepSeek Flash model. JPEG, PNG, GIF, and WebP inputs are accepted by the
 homework runner.
 
 
-## Homework 1 solution: 
-> to students: please fill your solution description here.
+## Homework 1 solution:
+
+### Chain design
+
+```
+                 ┌─────────────────────────┐
+ receipt.jpg ──▶ │ ChatPromptTemplate       │
+ (per receipt)   │  system: extraction      │
+                 │  rules + few-shot format │
+                 │  human: image + text     │
+                 └────────────┬─────────────┘
+                              ▼
+                 ┌─────────────────────────┐
+                 │ ChatDeepSeek             │
+                 │ deepseek-v4-flash-       │
+                 │ vision-exp (temp=0)      │
+                 └────────────┬─────────────┘
+                              ▼
+                 ┌─────────────────────────┐
+                 │ JsonOutputParser         │
+                 │ -> {items, discounts,    │
+                 │     subtotal, rounding,  │
+                 │     final_paid}          │
+                 └────────────┬─────────────┘
+                              ▼
+      all receipts ──▶ chain.batch() (parallel calls)
+                              ▼
+                 ┌─────────────────────────┐
+                 │ reflection check (code) │
+                 │ items - discounts       │
+                 │   == subtotal ?         │
+                 │ subtotal + rounding     │
+                 │   == final_paid ?       │
+                 └──────┬───────────┬──────┘
+                    consistent   inconsistent
+                        │              │
+                        │      retry same receipt
+                        │      with a corrective hint
+                        │      (up to 2 attempts)
+                        ▼              ▼
+                 ┌─────────────────────────┐
+                 │ sum in Python (Decimal) │
+                 │ Q1 = Σ final_paid       │
+                 │ Q2 = Σ (items -         │
+                 │        discounts) +     │
+                 │        Σ discounts      │
+                 │      = Σ items          │
+                 └────────────┬─────────────┘
+                              ▼
+                 {"HK$...": Q1, "HK$...": Q2}
+```
+
+### Description
+
+`build_chain()` wires a single reusable pipeline — a multimodal `ChatPromptTemplate`
+(system instructions + one human message carrying the receipt image and a text
+instruction), the vision-capable `deepseek-v4-flash-vision-exp` model at
+`temperature=0`, and a `JsonOutputParser` — that turns one receipt image into a
+structured JSON object of its items, discounts, subtotal, rounding, and final
+paid amount. `answer_queries()` runs this chain over every receipt in the folder
+with `chain.batch()` for parallel extraction, then applies a reflection step in
+plain Python: each receipt's numbers must satisfy `items - discounts ==
+subtotal` and `subtotal + rounding == final_paid` within a small tolerance; any
+receipt that fails this check is re-sent through the chain with a corrective
+hint describing exactly which line items commonly get missed or misread, up to
+two retries. Once every receipt passes (or retries are exhausted), the two
+final answers are computed deterministically in code rather than asking the
+model to do arithmetic: Query 1 sums each receipt's `final_paid` (the actual
+amount after rounding), and Query 2 sums each receipt's pre-discount item total
+(`items`, i.e. `subtotal + discounts`), so rounding is correctly excluded from
+Query 2 while it is correctly included in Query 1. Keeping the summation out of
+the LLM and doing the reconciliation check + targeted retries in code makes the
+result robust to occasional misreads on any single receipt and keeps each
+response formatted as exactly one `HK$` amount.
 
